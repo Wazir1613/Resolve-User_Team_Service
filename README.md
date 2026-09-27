@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # User & Team Service
 
 Express.js + PostgreSQL service for Resolve users, teams, and team membership.
