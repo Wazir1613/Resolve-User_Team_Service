@@ -1,0 +1,184 @@
+
+
+Integration user team service · MD
+# Integration Guide — User & Team Service
+ 
+**Who this is for:** anyone on the Resolve team who needs to connect their service
+to User & Team Service, or connect User & Team Service to someone else's.
+**What this is not:** a rewrite of the API contract. For exact request/response
+shapes, see `Contracts/User_Team_Service.md`. This doc explains *why* each
+connection exists and *what to actually do* about it, in plain language.
+ 
+---
+ 
+## The one-paragraph mental model
+ 
+Think of User & Team Service as a company's **HR department**. It keeps the
+employee records (`users`) and the department rosters (`teams`,
+`team_members`). HR doesn't work alone, though:
+ 
+- It needs the **company directory** (Organization Service) to know which
+  company (tenant) each employee belongs to — you can't hire someone into a
+  company that doesn't exist.
+- **Security** (Authentication) handles the actual badge/keycard printing
+  (`password_hash`) — HR keeps a slot for it in the employee file, but never
+  touches what's written there itself.
+- **Security clearance** (RBAC) decides what each employee is allowed to do —
+  that's a separate department entirely, HR just supplies the employee list
+  it works from.
+- Everyone else in the company (**Case Management, Workflow, Document
+  Service**) occasionally needs to double-check "is this person real and
+  active?" before assigning them work — they ask HR, not each other.
+---
+ 
+## Who connects to User & Team Service, and in which direction
+ 
+| Other service | Direction | Why |
+|---|---|---|
+| **Organization Service** (Task 2) | User & Team **depends on it** | Every user needs a real `organization_id` to belong to |
+| **Authentication Service** (Task 4) | Authentication **depends on** User & Team | Authentication calls User & Team's internal endpoints to look up users and manage the one column (`password_hash`) it owns |
+| **RBAC Service** (Task 5) | RBAC **depends on** User & Team | Roles and permissions attach to real user IDs — RBAC needs `users` to exist, nothing more |
+| **Case Management, Workflow, Document Service** | They **may call** User & Team | To confirm a `uploaded_by`/`assigned_to` user ID is real before writing it elsewhere |
+ 
+**The direction that matters most:** User & Team Service is mostly something
+*other* services lean on, not the other way around. Its own only real upstream
+dependency is Organization Service.
+ 
+---
+ 
+## Connection 1 — Organization Service (Task 2)
+ 
+**Plain words:** before HR can hire someone, the company they're being hired
+into has to actually exist.
+ 
+**What to check:** does the user-creation code (`POST /api/v1/users`)
+currently verify the `organizationId` it's given is real and `ACTIVE`, or
+does it just trust whatever ID shows up in the request/JWT?
+ 
+**If it doesn't check yet**, here's the shape to add — same pattern used
+elsewhere in this project (a small stub function you swap for a real call
+later):
+ 
+```javascript
+// src/organization/organizationClient.js
+async function assertOrganizationActive(tenantId)
+{
+    return true; // placeholder — replace with a real call to
+                 // GET /internal/v1/organizations/{id} once Organization
+                 // Service is reachable, and reject if status !== "ACTIVE"
+}
+ 
+module.exports = { assertOrganizationActive };
+```
+ 
+Call it once, at the top of user/team creation — not on every read, just on
+writes, same as the suspended-tenant rule described in Organization
+Service's own contract (§8: writes should be rejected for a suspended org).
+ 
+---
+ 
+## Connection 2 — Authentication Service (Task 4)
+ 
+**Plain words:** this is the one genuinely two-way relationship. User & Team
+owns the `users` table, but the one column that matters most for security —
+`password_hash` — is written exclusively by Authentication, never by User &
+Team itself. Authentication reaches *into* User & Team's table through three
+specific doors, never by connecting to the database directly.
+ 
+**The three doors Authentication uses (these should already exist, since
+Authentication's login flow is built around them):**
+ 
+| Endpoint | What it's for |
+|---|---|
+| `GET /internal/v1/users/lookup?organizationId=&email=` | Turn an email into a `userId`, so Authentication knows who's trying to log in |
+| `POST /internal/v1/users/{id}/verify-credentials` | Authentication sends a plaintext password over the internal network; User & Team hashes and compares it, and only ever returns `true`/`false` — the hash itself never leaves this service |
+| `PATCH /internal/v1/users/{id}/password-hash` | Authentication sets a new password (first-time or reset) the same way — sends plaintext, User & Team hashes it before writing |
+ 
+**What to check, concretely:** open `src/internal/` (or wherever the
+internal routes live) and confirm these three exist, and that they're gated
+by service-to-service auth (`src/security/`), not open to the public
+internet. If they're missing, that's the real blocker for Authentication —
+nothing else in that service can work without them.
+ 
+**The one confirmed naming conflict to fix before this goes further:**
+Authentication's real JWT puts the tenant in a field called **`tenantId`**.
+An earlier draft of User & Team's own contract called it `organization_id`
+instead — those can't both be right. **Use `tenantId`** everywhere in this
+service that reads the JWT, and double-check any code that currently expects
+the other name.
+ 
+---
+ 
+## Connection 3 — RBAC Service (Task 5)
+ 
+**Plain words:** RBAC doesn't ask User & Team for anything at request time —
+it just needs `users` and `teams` to already exist, since its own tables
+(`user_roles`, `role_permissions`) point at user IDs that live here.
+ 
+**What to do:** nothing active. This connection is satisfied just by User &
+Team Service existing and being stable — no new endpoint, no new client
+code. If RBAC's team ever asks "can we get a list of all user IDs in an
+org," that's just the existing `GET /api/v1/users?organizationId=` endpoint,
+already built.
+ 
+---
+ 
+## Connection 4 — Everyone downstream (Case Management, Workflow, Document Service)
+ 
+**Plain words:** when another service is about to write "assigned to user
+X" or "uploaded by user X," it may want to double-check X is a real, active
+person first — the same way Document Service double-checks a case exists
+before attaching a file to it.
+ 
+**What this needs on your side:** a generic internal lookup, if one doesn't
+exist yet:
+ 
+```text
+GET /internal/v1/users/{id}
+→ { "id": "...", "organizationId": "...", "fullName": "...", "status": "ACTIVE" }
+```
+ 
+This isn't in the original contract's written internal-endpoints list (which
+only covers Authentication's three doors above) — it's the same kind of gap
+Document Service's own contract flagged for Case Management. Worth raising
+with the team at Task 0/11 sign-off rather than guessing at the exact shape
+alone.
+ 
+---
+ 
+## Quick checklist for whoever picks this up
+ 
+- [ ] Confirm the suspended-organization check exists (or stub it, Connection 1)
+- [ ] Confirm the three Authentication-facing internal endpoints exist and are locked down to service-to-service callers only
+- [ ] Fix any code still reading `organization_id` off the JWT instead of `tenantId`
+- [ ] Decide, with the team, whether a generic `GET /internal/v1/users/{id}` is needed for Case Management/Workflow/Document Service, and build it if so
+- [ ] Confirm RBAC needs nothing further from this service beyond `users`/`teams` existing
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
