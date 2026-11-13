@@ -1,82 +1,33 @@
 const { z } = require('zod');
 const { HttpError } = require('../middleware/errorHandler');
-
 const STATUSES = ['ACTIVE', 'INACTIVE', 'SUSPENDED'];
-
 const uuidSchema = z.string().uuid();
-
-function normalize(value)
-{
-  return typeof value === 'string' ? value.trim().toLowerCase() : value;
-}
-
-const emailSchema = z.preprocess(normalize, z.string().email());
-const usernameSchema = z.preprocess(normalize, z.string().min(1).max(100));
-
-const createUserBodySchema = z.object({
-  email: emailSchema,
-  username: usernameSchema,
-  fullName: z.string().min(1).max(255),
-  status: z.enum(STATUSES).optional(),
-});
-
-const patchUserBodySchema = z.object({
-  email: emailSchema.optional(),
-  username: usernameSchema.optional(),
-  fullName: z.string().min(1).max(255).optional(),
-  status: z.string().optional(),
-});
-
+const emailSchema = z.string().trim().email();
+const usernameSchema = z.string().trim().min(1).max(100);
+const createUserBodySchema = z.object({ email: emailSchema, username: usernameSchema, fullName: z.string().trim().min(1).max(255), status: z.enum(STATUSES).optional() }).strict();
+const patchUserBodySchema = z.object({ email: emailSchema.optional(), username: usernameSchema.optional(), fullName: z.string().trim().min(1).max(255).optional(), status: z.enum(STATUSES).optional() }).strict().refine((value) => Object.keys(value).length > 0, 'At least one field must be provided');
 function fieldErrorsFromZod(err) {
-  return err.issues.map((issue) => ({
-    field: issue.path.join('.') || 'body',
-    code: issue.code === 'invalid_string' && issue.validation === 'email' ? 'INVALID_FORMAT' : 'INVALID_VALUE',
-    message: issue.message,
-  }));
+  return err.issues.map((issue) => ({ field: issue.path.join('.') || 'body', code: issue.code === 'invalid_string' && issue.validation === 'email' ? 'INVALID_FORMAT' : issue.code === 'invalid_enum_value' ? 'INVALID_ENUM_VALUE' : 'INVALID_VALUE', message: issue.message }));
 }
-
-function validateCreateUser(req, res, next) {
-  const body = { ...req.body };
-  delete body.password_hash;
-  delete body.passwordHash;
-  const parsed = createUserBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return next(
-        new HttpError(400, 'USER_VALIDATION_ERROR', 'Request validation failed', fieldErrorsFromZod(parsed.error))
-    );
-  }
+function validateBody(schema, req, next) {
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return next(new HttpError(400, 'USER_VALIDATION_ERROR', 'Request validation failed', fieldErrorsFromZod(parsed.error)));
   req.validatedBody = parsed.data;
   return next();
 }
-
+function validateCreateUser(req, res, next) { return validateBody(createUserBodySchema, req, next); }
 function validatePatchUser(req, res, next) {
-  const body = { ...req.body };
-  delete body.password_hash;
-  delete body.passwordHash;
-  const parsed = patchUserBodySchema.safeParse(body);
+  const parsed = patchUserBodySchema.safeParse(req.body);
   if (!parsed.success) {
-    return next(
-        new HttpError(400, 'USER_VALIDATION_ERROR', 'Request validation failed', fieldErrorsFromZod(parsed.error))
-    );
-  }
-  if (parsed.data.status !== undefined && !STATUSES.includes(parsed.data.status)) {
-    return next(new HttpError(400, 'USER_INVALID_STATUS', 'status must be one of ACTIVE, INACTIVE, SUSPENDED'));
+    const statusIssue = parsed.error.issues.find((issue) => issue.path[0] === 'status');
+    if (statusIssue && statusIssue.code === 'invalid_enum_value') return next(new HttpError(400, 'USER_INVALID_STATUS', 'Request validation failed', [{ field: 'status', code: 'INVALID_ENUM_VALUE', message: 'status must be one of ACTIVE, INACTIVE, SUSPENDED' }]));
+    return next(new HttpError(400, 'USER_VALIDATION_ERROR', 'Request validation failed', fieldErrorsFromZod(parsed.error)));
   }
   req.validatedBody = parsed.data;
   return next();
 }
-
 function validateUserIdParam(req, res, next) {
-  const parsed = uuidSchema.safeParse(req.params.id);
-  if (!parsed.success) {
-    return next(new HttpError(404, 'USER_NOT_FOUND', 'User not found'));
-  }
+  if (!uuidSchema.safeParse(req.params.id).success) return next(new HttpError(404, 'USER_NOT_FOUND', 'User not found'));
   return next();
 }
-
-module.exports = {
-  STATUSES,
-  validateCreateUser,
-  validatePatchUser,
-  validateUserIdParam,
-};
+module.exports = { STATUSES, validateCreateUser, validatePatchUser, validateUserIdParam };
