@@ -1,7 +1,27 @@
-const {jwtVerify}=require('jose');
-const {HttpError}=require('../middleware/errorHandler');
-async function lookupUser(req,res){const user=await require('../users/users.repository').findForInternalLookup(req.validatedQuery);if(!user)throw new HttpError(404,'USER_NOT_FOUND','User not found');res.status(200).json({userId:user.id,status:user.status});}
-async function verifyCredentials(req,res){const users=require('../users/users.repository');const bcrypt=require('bcryptjs');const user=await users.findCredentialRecordById(req.params.id);if(!user)throw new HttpError(404,'USER_NOT_FOUND','User not found');const valid=Boolean(user.passwordHash)&&await bcrypt.compare(req.validatedBody.plaintextPassword,user.passwordHash);res.status(200).json({valid,status:user.status,organizationId:user.organizationId});}
-async function patchPasswordHash(req,res){const bcrypt=require('bcryptjs');const users=require('../users/users.repository');const hash=await bcrypt.hash(req.validatedBody.newPlaintextPassword,12);if(!await users.updatePasswordHash(req.params.id,hash))throw new HttpError(404,'USER_NOT_FOUND','User not found');res.status(204).send();}
-async function getInternalUser(req,res){const user=await require('../users/users.repository').findInternalStatusById(req.params.id);if(!user)throw new HttpError(404,'USER_NOT_FOUND','User not found');res.status(200).json(user);}
-module.exports={lookupUser,verifyCredentials,patchPasswordHash,getInternalUser};
+const bcrypt = require('bcryptjs');
+const { HttpError } = require('../middleware/errorHandler');
+const usersRepository = require('../users/users.repository');
+const SALT_ROUNDS = 12;
+function userNotFoundError() { return new HttpError(404, 'USER_NOT_FOUND', 'User not found'); }
+async function lookupUser(req, res) {
+  const user = await usersRepository.findForInternalLookup(req.validatedQuery);
+  if (!user) throw userNotFoundError();
+  return res.status(200).json({ userId: user.id, status: user.status });
+}
+async function verifyCredentials(req, res) {
+  const user = await usersRepository.findCredentialRecordById(req.params.id);
+  if (!user) throw userNotFoundError();
+  const valid = Boolean(user.passwordHash) && await bcrypt.compare(req.validatedBody.plaintextPassword, user.passwordHash);
+  return res.status(200).json({ valid, status: user.status, organizationId: user.organizationId });
+}
+async function patchPasswordHash(req, res) {
+  const hash = await bcrypt.hash(req.validatedBody.newPlaintextPassword, SALT_ROUNDS);
+  if (!await usersRepository.updatePasswordHash(req.params.id, hash)) throw userNotFoundError();
+  return res.status(204).send();
+}
+async function getInternalUser(req, res) {
+  const user = await usersRepository.findInternalStatusById(req.params.id);
+  if (!user) throw userNotFoundError();
+  return res.status(200).json(user);
+}
+module.exports = { lookupUser, verifyCredentials, patchPasswordHash, getInternalUser };

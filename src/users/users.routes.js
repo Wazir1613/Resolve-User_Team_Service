@@ -3,12 +3,12 @@ const { asyncHandler } = require('../utils/asyncHandler');
 const { idempotencyMiddleware } = require('../middleware/idempotency');
 const { authenticate } = require('../middleware/authenticate');
 const { authorize } = require('../middleware/authorize');
-const usersController = require('./users.controller');
+const controller = require('./users.controller');
 const { validateCreateUser, validatePatchUser, validateUserIdParam } = require('./users.validation');
-
 const router = express.Router();
-router.post('/', authenticate, authorize('IAM_USER_MANAGE'), validateCreateUser, idempotencyMiddleware, asyncHandler(usersController.createUser));
-router.get('/', authenticate, authorize('IAM_USER_MANAGE', 'IAM_USER_VIEW'), asyncHandler(usersController.listUsers));
-router.get('/:id', authenticate, validateUserIdParam, asyncHandler(usersController.getUserById));
-router.patch('/:id', authenticate, validateUserIdParam, validatePatchUser, asyncHandler(usersController.patchUser));
+router.post('/', authenticate, authorize('IAM_USER_MANAGE'), validateCreateUser, idempotencyMiddleware, asyncHandler(controller.createUser));
+router.get('/', authenticate, authorize('IAM_USER_MANAGE', 'IAM_USER_VIEW'), asyncHandler(controller.listUsers));
+router.get('/:id', authenticate, validateUserIdParam, asyncHandler(controller.getUserById));
+router.patch('/:id', authenticate, validateUserIdParam, validatePatchUser, asyncHandler(controller.patchUser));
+// User deactivation is a status PATCH; hard-delete route intentionally omitted.
 module.exports = router;

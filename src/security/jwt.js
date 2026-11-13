@@ -1,5 +1,4 @@
 const { jwtVerify } = require('jose');
-
 function createJwtVerifier(secret, issuer) {
   if (!secret) throw new Error('JWT_SECRET is required');
   const key = new TextEncoder().encode(secret);
@@ -8,14 +7,8 @@ function createJwtVerifier(secret, issuer) {
       const options = { algorithms: ['HS256'] };
       if (issuer) options.issuer = issuer;
       const { payload } = await jwtVerify(token, key, options);
-      if (typeof payload.sub !== 'string' || typeof payload.tenantId !== 'string' || payload.type !== 'access') {
-        throw new Error('Invalid token payload');
-      }
-      return {
-        userId: payload.sub,
-        tenantId: payload.tenantId,
-        permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
-      };
+      if (typeof payload.sub !== 'string' || typeof payload.tenantId !== 'string' || payload.type !== 'access') throw new Error('Invalid token payload');
+      return { userId: payload.sub, tenantId: payload.tenantId, permissions: Array.isArray(payload.permissions) ? payload.permissions : [] };
     },
   };
 }

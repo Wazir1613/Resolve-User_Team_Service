@@ -1,12 +1,12 @@
 const { HttpError } = require('../middleware/errorHandler');
 
 async function assertOrganizationActive(organizationId) {
-  // Test bypass is process-scoped and only enabled by the Jest setup file.
   if (process.env.NODE_ENV === 'test' && process.env.TEST_AUTH_BYPASS === 'true') return true;
   const baseUrl = process.env.ORGANIZATION_SERVICE_URL;
   if (!baseUrl) throw new HttpError(503, 'ORGANIZATION_SERVICE_UNAVAILABLE', 'Organization validation is not configured');
   const headers = { accept: 'application/json' };
-  if (process.env.ORGANIZATION_SERVICE_TOKEN) headers.authorization = `Bearer ${process.env.ORGANIZATION_SERVICE_TOKEN}`;
+  const token = process.env.ORGANIZATION_SERVICE_TOKEN;
+  if (token) headers.authorization = `Bearer ${token}`;
   let response;
   try {
     response = await fetch(`${baseUrl.replace(/\/$/, '')}/internal/v1/organizations/${encodeURIComponent(organizationId)}`, {
@@ -22,4 +22,4 @@ async function assertOrganizationActive(organizationId) {
   if (organization.status !== 'ACTIVE') throw new HttpError(409, 'ORGANIZATION_INACTIVE', 'Organization is not active');
   return true;
 }
-module.exports={assertOrganizationActive};
+module.exports = { assertOrganizationActive };

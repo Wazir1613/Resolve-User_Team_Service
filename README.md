@@ -4,30 +4,25 @@ This service owns users (profile fields), teams, and team membership. It is sync
 
 ## Run locally
 
-```bash
-docker compose up -d
+```powershell
+Copy-Item .env.example .env -ErrorAction SilentlyContinue
 npm install
-cp .env.example .env
-# Configure JWT, internal service auth, and Organization Service connection values.
-npm start
+docker compose up -d
+npm test
 ```
 
-Migrations run at startup (`npm run migrate` to run separately). Health check: `/health`; API docs: `/api-docs`.
+The default local DB URL uses the Compose credentials. Integration tests delete rows from `users`, `teams`, and `team_members`; use only a disposable test database.
 
-## Public API
+## Public API and auth
 
-All `/api/v1` routes require a JWT bearer access token. The tenant comes only from the JWT `tenantId` claim; request query/body organization IDs cannot set scope. Relevant permission claims are `IAM_USER_MANAGE`, `IAM_USER_VIEW`, `IAM_TEAM_MANAGE`, and `IAM_TEAM_VIEW`. Cross-tenant IDs return 404. Users can always read their own profile and can edit only their own `fullName` absent manage permission. User deletion and public password changes are not provided. Resource-creating POSTs require `Idempotency-Key`.
+Public routes under `/api/v1` require an access bearer JWT. Tenant scope comes only from `tenantId`; query/body organization values do not set tenant scope. Permission claims are `IAM_USER_MANAGE`, `IAM_USER_VIEW`, `IAM_TEAM_MANAGE`, and `IAM_TEAM_VIEW`. Cross-tenant resources return 404. Self profile reads are allowed; self PATCH may change only `fullName`. User hard delete and public password changes are not exposed. All creating POSTs require an Idempotency-Key.
 
-## Organization dependency
+## Dependencies and internal routes
 
-Creating users and teams calls the Organization Service at `ORGANIZATION_SERVICE_URL/internal/v1/organizations/{organizationId}`. Configure `ORGANIZATION_SERVICE_TOKEN`; the service fails closed when the dependency is missing/unavailable and only proceeds when organization status is `ACTIVE`. Confirm that this URL and service authentication match the deployed Organization Service contract.
+Before creating users/teams, the service calls Organization Service at `ORGANIZATION_SERVICE_URL/internal/v1/organizations/{organizationId}` and proceeds only when status is ACTIVE. Configure its service token. Missing/unavailable dependency fails closed.
 
-## Internal API
+Internal `/internal/v1` routes require a verified mTLS client certificate or an internal signed JWT containing a `service` claim. Never forward the end-user bearer token. Credential endpoints accept plaintext only on the protected service channel, hash/compare using bcrypt, and never return hashes.
 
-`/internal/v1` is service-to-service only. It accepts mTLS (when client certificate verification is configured) or a signed internal JWT with a `service` claim. Never forward the end-user token. Internal endpoints: lookup by resolved organization ID/email, get user by ID, verify credentials, and update password from plaintext. Bcrypt hashing/comparison occurs here. Password hashes are never returned or logged.
+## Local install note
 
-The idempotency store is in-memory and adequate only for one service process; production multi-instance deployment needs shared durable storage.
-
-## Tests
-
-`npm test` requires PostgreSQL. Jest's auth bypass is test-only (`NODE_ENV=test` and `TEST_AUTH_BYPASS=true`) and must never be enabled in runtime environments.
+The project uses jose 6 (ESM). The service loads its JWT helpers with dynamic imports for CommonJS compatibility. `package-lock.json` must stay committed in sync with `package.json`; use `npm ci` on clean checkouts.

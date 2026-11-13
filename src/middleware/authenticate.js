@@ -2,16 +2,12 @@ const { createJwtVerifier } = require('../security/jwt');
 const { HttpError } = require('./errorHandler');
 const verifier = createJwtVerifier(process.env.JWT_SECRET, process.env.JWT_ISSUER);
 const DEFAULT_TEST_PERMISSIONS = ['IAM_USER_MANAGE', 'IAM_USER_VIEW', 'IAM_TEAM_MANAGE', 'IAM_TEAM_VIEW'];
-
 async function authenticate(req, res, next) {
   if (process.env.NODE_ENV === 'test' && process.env.TEST_AUTH_BYPASS === 'true') {
-    // Test callers can explicitly model least-privilege users; never enabled outside Jest.
     req.organizationId = req.get('x-test-organization-id') || '11111111-1111-1111-1111-111111111111';
     req.userId = req.get('x-test-user-id') || '00000000-0000-4000-8000-000000000001';
-    const testPermissions = req.get('x-test-permissions');
-    req.permissions = testPermissions === undefined
-      ? DEFAULT_TEST_PERMISSIONS
-      : testPermissions.split(',').map((permission) => permission.trim()).filter(Boolean);
+    const permissions = req.get('x-test-permissions');
+    req.permissions = permissions === undefined ? DEFAULT_TEST_PERMISSIONS : permissions.split(',').map((p) => p.trim()).filter(Boolean);
     return next();
   }
   const match = (req.header('authorization') || '').match(/^Bearer\s+(\S+)$/i);
