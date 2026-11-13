@@ -1,54 +1,73 @@
 openapi: 3.0.3
 info:
   title: Resolve User & Team Service
-  version: "1.0.0"
+  version: 1.1.0
 servers:
   - url: http://localhost:8080
 components:
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    serviceAuth: { type: http, scheme: bearer, bearerFormat: service-JWT }
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
       schema: { type: string }
+    OrganizationId:
+      name: organizationId
+      in: query
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     User:
       type: object
       properties:
         id: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
-        email: { type: string }
+        email: { type: string, format: email }
         username: { type: string }
         fullName: { type: string }
         status: { type: string, enum: [ACTIVE, INACTIVE, SUSPENDED] }
-        createdAt: { type: string }
-        updatedAt: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     Team:
       type: object
       properties:
         id: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
         name: { type: string }
-        createdAt: { type: string }
-        updatedAt: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Page:
+      type: object
+      properties:
+        content: { type: array, items: {} }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+    Error:
+      type: object
+      required: [timestamp, status, code, message, path, requestId, traceId]
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        code: { type: string }
+        message: { type: string }
+        path: { type: string }
+        requestId: { type: string }
+        traceId: { type: string }
+        errors: { type: array, items: { type: object } }
 security:
   - bearerAuth: []
 paths:
   /health:
     get:
-      summary: Liveness check
       security: []
-      responses:
-        "200": { description: OK }
-
+      responses: { '200': { description: OK } }
   /api/v1/users:
     post:
-      summary: Create a user
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
@@ -58,166 +77,123 @@ paths:
               type: object
               required: [email, username, fullName]
               properties:
-                email: { type: string }
-                username: { type: string }
-                fullName: { type: string }
+                email: { type: string, format: email }
+                username: { type: string, maxLength: 100 }
+                fullName: { type: string, maxLength: 255 }
                 status: { type: string, enum: [ACTIVE, INACTIVE, SUSPENDED] }
       responses:
-        "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { description: Validation error }
+        '401': { description: Missing or invalid JWT }
+        '403': { description: IAM_USER_MANAGE required }
+        '409': { description: Duplicate email or username }
     get:
-      summary: List users
       parameters:
         - { name: email, in: query, schema: { type: string } }
         - { name: username, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { type: string } }
-        - { name: page, in: query, schema: { type: integer } }
-        - { name: size, in: query, schema: { type: integer } }
-        - { name: sort, in: query, schema: { type: string } }
-      responses:
-        "200": { description: OK }
-
+        - { name: teamId, in: query, schema: { type: string, format: uuid } }
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+        - { name: size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - { name: sort, in: query, schema: { type: string, default: 'createdAt,desc' } }
+      responses: { '200': { description: Paginated users }, '401': { description: Unauthorized }, '403': { description: IAM_USER_VIEW or IAM_USER_MANAGE required } }
   /api/v1/users/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
     get:
-      summary: Get one user
-      parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
-        "404": { description: Not found }
+      responses: { '200': { description: User profile }, '403': { description: Forbidden }, '404': { description: Not found in tenant } }
     patch:
-      summary: Update a user
-      parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              minProperties: 1
               properties:
-                email: { type: string }
-                username: { type: string }
-                fullName: { type: string }
+                email: { type: string, format: email }
+                username: { type: string, maxLength: 100 }
+                fullName: { type: string, maxLength: 255 }
                 status: { type: string, enum: [ACTIVE, INACTIVE, SUSPENDED] }
-      responses:
-        "200": { description: OK }
-    delete:
-      summary: Deactivate a user
-      parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-      responses:
-        "204": { description: Deactivated }
-
+      responses: { '200': { description: Updated user }, '400': { description: Invalid fields }, '403': { description: Forbidden }, '404': { description: Not found in tenant }, '409': { description: Duplicate email or username } }
   /api/v1/teams:
     post:
-      summary: Create a team
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name: { type: string }
-      responses:
-        "201": { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } } }
+            schema: { type: object, required: [name], properties: { name: { type: string, maxLength: 255 } } }
+      responses: { '201': { description: Created team }, '400': { description: Validation error }, '401': { description: Unauthorized }, '403': { description: IAM_TEAM_MANAGE required }, '409': { description: Duplicate team name } }
     get:
-      summary: List teams
       parameters:
         - { name: name, in: query, schema: { type: string } }
-        - { name: page, in: query, schema: { type: integer } }
-        - { name: size, in: query, schema: { type: integer } }
-      responses:
-        "200": { description: OK }
-
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+        - { name: size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+        - { name: sort, in: query, schema: { type: string, default: 'createdAt,desc' } }
+      responses: { '200': { description: Paginated teams }, '403': { description: IAM_TEAM_VIEW or IAM_TEAM_MANAGE required } }
   /api/v1/teams/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
     get:
-      summary: Get one team
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        "200": { description: OK }
+      responses: { '200': { description: Team visible to authorized viewer or member }, '403': { description: Forbidden }, '404': { description: Not found in tenant } }
     patch:
-      summary: Rename a team
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       requestBody:
+        required: true
         content:
           application/json:
-            schema: { type: object, required: [name], properties: { name: { type: string } } }
-      responses:
-        "200": { description: OK }
+            schema: { type: object, required: [name], properties: { name: { type: string, maxLength: 255 } } }
+      responses: { '200': { description: Updated team }, '403': { description: Forbidden }, '404': { description: Not found in tenant }, '409': { description: Duplicate name } }
     delete:
-      summary: Delete a team
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        "204": { description: Deleted }
-
+      responses: { '204': { description: Deleted; memberships cascade }, '403': { description: Forbidden }, '404': { description: Not found in tenant } }
   /api/v1/teams/{id}/members:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
     post:
-      summary: Add a team member
-      parameters:
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { $ref: '#/components/parameters/IdempotencyKey' }
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { type: object, required: [userId], properties: { userId: { type: string, format: uuid } } }
-      responses:
-        "201": { description: Added }
+      responses: { '201': { description: Member added }, '403': { description: Forbidden }, '404': { description: Team or user not found in tenant }, '409': { description: Already a member } }
     get:
-      summary: List team members
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        "200": { description: OK }
-
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+        - { name: size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses: { '200': { description: Paginated members }, '403': { description: Forbidden }, '404': { description: Team not found in tenant } }
   /api/v1/teams/{id}/members/{userId}:
     delete:
-      summary: Remove a team member
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
-      responses:
-        "204": { description: Removed }
-
+      responses: { '204': { description: Member removed }, '403': { description: Forbidden }, '404': { description: Team or membership not found } }
   /internal/v1/users/lookup:
     get:
-      summary: Internal user lookup by org + email
-      security: []
+      security: [{ serviceAuth: [] }]
       parameters:
-        - { name: organizationId, in: query, schema: { type: string, format: uuid } }
-        - { name: email, in: query, required: true, schema: { type: string } }
-      responses:
-        "200": { description: OK }
-
-  /internal/v1/users/{id}/verify-credentials:
-    post:
-      summary: Verify credentials (internal)
-      security: []
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      requestBody:
-        content:
-          application/json:
-            schema: { type: object, properties: { plaintextPassword: { type: string } } }
-      responses:
-        "200": { description: OK }
-
-  /internal/v1/users/{id}/password-hash:
-    patch:
-      summary: Set password (internal)
-      security: []
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      requestBody:
-        content:
-          application/json:
-            schema: { type: object, properties: { newPlaintextPassword: { type: string } } }
-      responses:
-        "204": { description: Updated }
-
+        - { $ref: '#/components/parameters/OrganizationId' }
+        - { name: email, in: query, required: true, schema: { type: string, format: email } }
+      responses: { '200': { description: { userId, status } }, '401': { description: Service authentication required }, '404': { description: User not found } }
   /internal/v1/users/{id}:
     get:
-      summary: Internal user status check
-      security: []
+      security: [{ serviceAuth: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        "200": { description: OK }
+      responses: { '200': { description: User id, organizationId, fullName and status }, '401': { description: Service authentication required }, '404': { description: Not found } }
+  /internal/v1/users/{id}/verify-credentials:
+    post:
+      security: [{ serviceAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [plaintextPassword], properties: { plaintextPassword: { type: string, format: password } } }
+      responses: { '200': { description: Boolean valid result and account status }, '401': { description: Service authentication required }, '404': { description: Not found } }
+  /internal/v1/users/{id}/password-hash:
+    patch:
+      security: [{ serviceAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [newPlaintextPassword], properties: { newPlaintextPassword: { type: string, format: password, minLength: 8 } } }
+      responses: { '204': { description: Updated without returning password hash }, '401': { description: Service authentication required }, '404': { description: Not found } }
