@@ -1,6 +1,6 @@
 # User & Team Service — Resolve Task 3
 
-Node.js/Express/PostgreSQL service owning user profiles, teams, and team membership.
+This service owns users (profile fields), teams, and team membership. It is synchronous REST only and emits no Kafka events in the initial scope.
 
 ## Run locally
 
@@ -8,28 +8,26 @@ Node.js/Express/PostgreSQL service owning user profiles, teams, and team members
 docker compose up -d
 npm install
 cp .env.example .env
-# Set JWT secrets and configure the Organization Service URL/token in .env.
+# Configure JWT, internal service auth, and Organization Service connection values.
 npm start
 ```
 
-Migrations run at service startup; run them separately with `npm run migrate`. Health check: `GET /health`; OpenAPI UI: `/api-docs`.
+Migrations run at startup (`npm run migrate` to run separately). Health check: `/health`; API docs: `/api-docs`.
 
-## Public API and auth
+## Public API
 
-Public endpoints use `/api/v1` and require `Authorization: Bearer <JWT>`. Tenant scope comes only from the JWT's `tenantId` claim; request query/body organization IDs never override it. The JWT must include permissions such as `IAM_USER_MANAGE`, `IAM_USER_VIEW`, `IAM_TEAM_MANAGE`, or `IAM_TEAM_VIEW`. A user may always read their own profile and may update only their own `fullName`. Tenant-scoped lookups hide cross-organization resources as 404. User deletion is deliberately not exposed; deactivate users by PATCHing status.
-
-Resource-creating POST endpoints require `Idempotency-Key`. The included idempotency cache is process-memory only: use a shared durable store for multi-instance production deployments.
+All `/api/v1` routes require a JWT bearer access token. The tenant comes only from the JWT `tenantId` claim; request query/body organization IDs cannot set scope. Relevant permission claims are `IAM_USER_MANAGE`, `IAM_USER_VIEW`, `IAM_TEAM_MANAGE`, and `IAM_TEAM_VIEW`. Cross-tenant IDs return 404. Users can always read their own profile and can edit only their own `fullName` absent manage permission. User deletion and public password changes are not provided. Resource-creating POSTs require `Idempotency-Key`.
 
 ## Organization dependency
 
-Before creating a user or team, the service calls `GET {ORGANIZATION_SERVICE_URL}/internal/v1/organizations/{organizationId}` with the configured service token and requires `status: ACTIVE`. Without this integration configured, create operations fail closed with 503. This service does not create, update, or otherwise modify another repository/service.
+Creating users and teams calls the Organization Service at `ORGANIZATION_SERVICE_URL/internal/v1/organizations/{organizationId}`. Configure `ORGANIZATION_SERVICE_TOKEN`; the service fails closed when the dependency is missing/unavailable and only proceeds when organization status is `ACTIVE`. Confirm that this URL and service authentication match the deployed Organization Service contract.
 
-## Internal service API
+## Internal API
 
-`/internal/v1/*` is guarded by a verified mTLS client certificate or an internal JWT signed with `INTERNAL_JWT_SECRET` and containing a non-empty `service` claim. Never forward a public user's bearer token. Endpoints are user lookup by resolved organization ID/email, get-by-ID, bcrypt credential verification, and password update from plaintext over the protected service channel. Password hashes are never returned, and plaintext passwords are not logged.
+`/internal/v1` is service-to-service only. It accepts mTLS (when client certificate verification is configured) or a signed internal JWT with a `service` claim. Never forward the end-user token. Internal endpoints: lookup by resolved organization ID/email, get user by ID, verify credentials, and update password from plaintext. Bcrypt hashing/comparison occurs here. Password hashes are never returned or logged.
 
-Internal paths: `GET /internal/v1/users/lookup?organizationId=...&email=...`, `GET /internal/v1/users/{id}`, `POST /internal/v1/users/{id}/verify-credentials`, and `PATCH /internal/v1/users/{id}/password-hash`.
+The idempotency store is in-memory and adequate only for one service process; production multi-instance deployment needs shared durable storage.
 
 ## Tests
 
-`npm test` requires PostgreSQL (`docker compose up -d`). A dedicated Jest setup enables a test-only auth bypass; the bypass is conditioned on `NODE_ENV=test` and has no effect in normal runtime.
+`npm test` requires PostgreSQL. Jest's auth bypass is test-only (`NODE_ENV=test` and `TEST_AUTH_BYPASS=true`) and must never be enabled in runtime environments.
