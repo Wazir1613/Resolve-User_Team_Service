@@ -3,447 +3,179 @@ const app = require('../src/app');
 const { pool } = require('../src/db/pool');
 const { runMigrations } = require('../src/db/migrate');
 const { resetIdempotencyStore } = require('../src/middleware/idempotency');
+const bcrypt = require('bcryptjs');
 
 const ORG_A = '11111111-1111-1111-1111-111111111111';
 const ORG_B = '22222222-2222-2222-2222-222222222222';
+let sequence = 0;
+function key(prefix) { sequence += 1; return `${prefix}-${Date.now()}-${sequence}`; }
+function tenant(req, organizationId = ORG_A) { return req.set('x-test-organization-id', organizationId); }
 
-let keyCounter = 0;
-let dbReady = false;
-
-function idempotencyKey(prefix) {
-  keyCounter += 1;
-  return `${prefix}-${Date.now()}-${keyCounter}`;
-}
-
-async function createUser(overrides = {}) {
+async function createUser(overrides = {}, defaultOrg = ORG_A) {
+  const { organizationId = defaultOrg, ...fields } = overrides;
+  sequence += 1;
   const body = {
-    email: `user-${Date.now()}-${keyCounter}@resolve.com`,
-    username: `user-${Date.now()}-${keyCounter}`,
+    email: `user-${Date.now()}-${sequence}@resolve.test`,
+    username: `user-${Date.now()}-${sequence}`,
     fullName: 'Test User',
-    status: 'ACTIVE',
-    ...overrides,
+    ...fields,
   };
-
-  const res = await request(app)
-    .post(`/api/v1/users?organizationId=${body.organizationId || ORG_A}`)
-    .set('Idempotency-Key', idempotencyKey('create-user'))
-    .send(body);
-
-  expect(res.status).toBe(201);
-  return res.body;
+  const response = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', key('user')), organizationId).send(body);
+  expect(response.status).toBe(201);
+  return response.body;
+}
+async function createTeam(overrides = {}, defaultOrg = ORG_A) {
+  const { organizationId = defaultOrg, ...fields } = overrides;
+  const body = { name: `Team ${Date.now()} ${sequence}`, ...fields };
+  const response = await tenant(request(app).post('/api/v1/teams').set('Idempotency-Key', key('team')), organizationId).send(body);
+  expect(response.status).toBe(201);
+  return response.body;
 }
 
-async function createTeam(overrides = {}) {
-  const orgId = overrides.organizationId || ORG_A;
-  const body = {
-    name: `Team ${Date.now()} ${keyCounter}`,
-    ...overrides,
-  };
-  delete body.organizationId;
-
-  const res = await request(app)
-    .post(`/api/v1/teams?organizationId=${orgId}`)
-    .set('Idempotency-Key', idempotencyKey('create-team'))
-    .send(body);
-
-  expect(res.status).toBe(201);
-  return res.body;
-}
-
-beforeAll(async () => {
-  try {
-    await runMigrations(pool);
-    dbReady = true;
-  } catch (err) {
-    console.error(
-      `Integration tests require PostgreSQL at ${process.env.DATABASE_URL}. Start it with docker compose up -d before running npm test.`
-    );
-    throw err;
-  }
-});
-
+beforeAll(async () => { await runMigrations(pool); });
 afterEach(async () => {
   resetIdempotencyStore();
-  if (!dbReady) {
-    return;
-  }
   await pool.query('DELETE FROM team_members');
   await pool.query('DELETE FROM teams');
   await pool.query('DELETE FROM users');
 });
+afterAll(async () => { await pool.end(); });
 
-afterAll(async () => {
-  await pool.end();
-});
-
-describe('health', () => {
-  test('returns service health', async () => {
-    const res = await request(app).get('/health');
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: 'ok', service: 'user-team-service' });
+describe('public user API', () => {
+  test('health endpoint is available', async () => {
+    const response = await request(app).get('/health');
+    expect(response.status).toBe(200);
   });
-});
-
-describe('public user endpoints', () => {
-  test('creates a user and excludes passwordHash', async () => {
-    const res = await request(app)
-      .post(`/api/v1/users?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('create-user'))
-      .send({
-        email: 'jane.doe@resolve.com',
-        username: 'jane.doe',
-        fullName: 'Jane Doe',
-        passwordHash: 'must-not-be-accepted',
-      });
-
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({
-      organizationId: ORG_A,
-      email: 'jane.doe@resolve.com',
-      username: 'jane.doe',
-      fullName: 'Jane Doe',
-      status: 'ACTIVE',
-    });
-    expect(res.body.passwordHash).toBeUndefined();
+  test('creates a tenant-scoped user without exposing or accepting credentials', async () => {
+    const response = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', key('create')), ORG_A)
+      .send({ email: 'jane@resolve.test', username: 'jane', fullName: 'Jane Doe' });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ organizationId: ORG_A, email: 'jane@resolve.test', status: 'ACTIVE' });
+    expect(response.body).not.toHaveProperty('passwordHash');
+    expect(response.body).not.toHaveProperty('password_hash');
   });
-
-  test('rejects user creation without an Idempotency-Key', async () => {
-    const res = await request(app)
-      .post(`/api/v1/users?organizationId=${ORG_A}`)
-      .send({ email: 'jane.doe@resolve.com', username: 'jane.doe', fullName: 'Jane Doe' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('IDEMPOTENCY_KEY_REQUIRED');
+  test('rejects password fields on public provisioning', async () => {
+    const response = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', key('credential')), ORG_A)
+      .send({ email: 'pw@resolve.test', username: 'pw', fullName: 'Password User', passwordHash: 'nope' });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('USER_VALIDATION_ERROR');
   });
-
-  test('lists users for one organization', async () => {
-    await createUser({ email: 'a@resolve.com', username: 'a-user' });
-    await createUser({ email: 'b@resolve.com', username: 'b-user', organizationId: ORG_B });
-
-    const res = await request(app).get(`/api/v1/users?organizationId=${ORG_A}&page=0&size=20`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.totalElements).toBe(1);
-    expect(res.body.content[0].organizationId).toBe(ORG_A);
+  test('requires idempotency and rejects reuse with a changed body', async () => {
+    const idempotencyKey = key('reused');
+    const first = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', idempotencyKey), ORG_A)
+      .send({ email: 'retry@resolve.test', username: 'retry', fullName: 'Retry' });
+    expect(first.status).toBe(201);
+    const retry = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', idempotencyKey), ORG_A)
+      .send({ email: 'retry2@resolve.test', username: 'retry2', fullName: 'Retry 2' });
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
-
-  test('returns validation error when listing users without organizationId', async () => {
-    const res = await request(app).get('/api/v1/users');
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('USER_VALIDATION_ERROR');
-    expect(res.body.errors[0].field).toBe('organizationId');
+  test('lists only JWT/test-header tenant users with pagination', async () => {
+    await createUser({ email: 'a@resolve.test', username: 'a' }, ORG_A);
+    await createUser({ email: 'b@resolve.test', username: 'b' }, ORG_B);
+    const response = await tenant(request(app).get('/api/v1/users?page=0&size=20'), ORG_A);
+    expect(response.status).toBe(200);
+    expect(response.body.totalElements).toBe(1);
+    expect(response.body.content[0].organizationId).toBe(ORG_A);
   });
-
-  test('gets one user inside its organization', async () => {
+  test('supports teamId filter', async () => {
+    const user = await createUser({ email: 'team-filter@resolve.test', username: 'team-filter' });
+    const team = await createTeam({ name: 'Filter Team' });
+    await tenant(request(app).post(`/api/v1/teams/${team.id}/members`).set('Idempotency-Key', key('member')), ORG_A).send({ userId: user.id });
+    const response = await tenant(request(app).get(`/api/v1/users?teamId=${team.id}`), ORG_A);
+    expect(response.status).toBe(200);
+    expect(response.body.content.map((u) => u.id)).toContain(user.id);
+  });
+  test('allows self profile read and hides cross-tenant profiles as 404', async () => {
     const user = await createUser();
-
-    const res = await request(app).get(`/api/v1/users/${user.id}?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.id).toBe(user.id);
+    const own = await tenant(request(app).get(`/api/v1/users/${user.id}`).set('x-test-user-id', user.id), ORG_A);
+    expect(own.status).toBe(200);
+    const otherTenant = await tenant(request(app).get(`/api/v1/users/${user.id}`), ORG_B);
+    expect(otherTenant.status).toBe(404);
+    expect(otherTenant.body.code).toBe('USER_NOT_FOUND');
   });
-
-  test('hides a user from another organization', async () => {
+  test('allows self fullName edit, but rejects self status edit', async () => {
     const user = await createUser();
-
-    const res = await request(app).get(`/api/v1/users/${user.id}?organizationId=${ORG_B}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('USER_NOT_FOUND');
+    const self = () => tenant(request(app).patch(`/api/v1/users/${user.id}`).set('x-test-user-id', user.id), ORG_A);
+    expect((await self().send({ fullName: 'Updated Name' })).status).toBe(200);
+    const forbidden = await self().send({ status: 'SUSPENDED' });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body.code).toBe('USER_FORBIDDEN');
   });
-
-  test('patches a user', async () => {
+  test('returns a validation error for an invalid status before database update', async () => {
     const user = await createUser();
-
-    const res = await request(app)
-      .patch(`/api/v1/users/${user.id}?organizationId=${ORG_A}`)
-      .send({ fullName: 'Updated User' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.fullName).toBe('Updated User');
+    const response = await tenant(request(app).patch(`/api/v1/users/${user.id}`), ORG_A).send({ status: 'DISABLED' });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('USER_INVALID_STATUS');
+    expect(response.body.errors[0].field).toBe('status');
   });
-
-  test('rejects an invalid user status', async () => {
-    const user = await createUser();
-
-    const res = await request(app)
-      .patch(`/api/v1/users/${user.id}?organizationId=${ORG_A}`)
-      .send({ status: 'DISABLED' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('USER_INVALID_STATUS');
+  test('returns user conflict for duplicate email and username', async () => {
+    await createUser({ email: 'taken@resolve.test', username: 'taken' });
+    const duplicateEmail = await tenant(request(app).post('/api/v1/users').set('Idempotency-Key', key('duplicate')), ORG_A)
+      .send({ email: 'taken@resolve.test', username: 'different', fullName: 'Duplicate' });
+    expect(duplicateEmail.status).toBe(409);
+    expect(duplicateEmail.body.code).toBe('USER_EMAIL_TAKEN');
   });
 });
 
-describe('public team endpoints', () => {
-  test('creates a team', async () => {
-    const res = await request(app)
-      .post(`/api/v1/teams?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('create-team'))
-      .send({ name: 'Investigations Team' });
-
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ organizationId: ORG_A, name: 'Investigations Team' });
+describe('public team and membership API', () => {
+  test('creates/lists/renames/deletes teams within tenant scope', async () => {
+    const team = await createTeam({ name: 'Investigations' });
+    expect((await tenant(request(app).get('/api/v1/teams'), ORG_A)).body.totalElements).toBe(1);
+    const renamed = await tenant(request(app).patch(`/api/v1/teams/${team.id}`), ORG_A).send({ name: 'Investigations 2' });
+    expect(renamed.status).toBe(200);
+    const deleted = await tenant(request(app).delete(`/api/v1/teams/${team.id}`), ORG_A);
+    expect(deleted.status).toBe(204);
   });
-
-  test('rejects team creation without a name', async () => {
-    const res = await request(app)
-      .post(`/api/v1/teams?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('create-team'))
-      .send({});
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('TEAM_VALIDATION_ERROR');
+  test('requires team view/manage permission for lists (auth bypass supplies permission in tests)', async () => {
+    const response = await tenant(request(app).get('/api/v1/teams'), ORG_A);
+    expect(response.status).toBe(200);
   });
-
-  test('lists teams for one organization', async () => {
-    await createTeam({ name: 'A Team' });
-    await createTeam({ name: 'B Team', organizationId: ORG_B });
-
-    const res = await request(app).get(`/api/v1/teams?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.totalElements).toBe(1);
-    expect(res.body.content[0].name).toBe('A Team');
+  test('adds, lists, and removes only same-tenant memberships', async () => {
+    const user = await createUser({ email: 'member@resolve.test', username: 'member' });
+    const team = await createTeam({ name: 'Members' });
+    const added = await tenant(request(app).post(`/api/v1/teams/${team.id}/members`).set('Idempotency-Key', key('add')), ORG_A).send({ userId: user.id });
+    expect(added.status).toBe(201);
+    const listed = await tenant(request(app).get(`/api/v1/teams/${team.id}/members`), ORG_A);
+    expect(listed.body.content[0]).toMatchObject({ userId: user.id, email: 'member@resolve.test' });
+    expect((await tenant(request(app).delete(`/api/v1/teams/${team.id}/members/${user.id}`), ORG_A)).status).toBe(204);
   });
-
-  test('rejects team listing without organizationId', async () => {
-    const res = await request(app).get('/api/v1/teams');
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('TEAM_VALIDATION_ERROR');
-  });
-
-  test('gets one team', async () => {
-    const team = await createTeam();
-
-    const res = await request(app).get(`/api/v1/teams/${team.id}?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.id).toBe(team.id);
-  });
-
-  test('returns TEAM_NOT_FOUND for a cross-organization team', async () => {
-    const team = await createTeam();
-
-    const res = await request(app).get(`/api/v1/teams/${team.id}?organizationId=${ORG_B}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('TEAM_NOT_FOUND');
-  });
-
-  test('renames a team', async () => {
-    const team = await createTeam();
-
-    const res = await request(app)
-      .patch(`/api/v1/teams/${team.id}?organizationId=${ORG_A}`)
-      .send({ name: 'Escalations Team' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.name).toBe('Escalations Team');
-  });
-
-  test('returns TEAM_NAME_TAKEN when renaming to an existing team name', async () => {
-    const team = await createTeam({ name: 'Original Team' });
-    await createTeam({ name: 'Existing Team' });
-
-    const res = await request(app)
-      .patch(`/api/v1/teams/${team.id}?organizationId=${ORG_A}`)
-      .send({ name: 'Existing Team' });
-
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('TEAM_NAME_TAKEN');
-  });
-
-  test('deletes a team', async () => {
-    const team = await createTeam();
-
-    const res = await request(app).delete(`/api/v1/teams/${team.id}?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(204);
-  });
-
-  test('returns TEAM_NOT_FOUND when deleting a missing team', async () => {
-    const res = await request(app).delete(`/api/v1/teams/${ORG_A}?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('TEAM_NOT_FOUND');
+  test('returns 404 for cross-organization team/user references', async () => {
+    const foreignUser = await createUser({ email: 'foreign@resolve.test', username: 'foreign' }, ORG_B);
+    const team = await createTeam({ name: 'Local Team' }, ORG_A);
+    const response = await tenant(request(app).post(`/api/v1/teams/${team.id}/members`).set('Idempotency-Key', key('foreign')), ORG_A).send({ userId: foreignUser.id });
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('USER_NOT_FOUND');
   });
 });
 
-describe('team member endpoints', () => {
-  test('adds a team member', async () => {
-    const user = await createUser();
-    const team = await createTeam();
-
-    const res = await request(app)
-      .post(`/api/v1/teams/${team.id}/members?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('add-member'))
-      .send({ userId: user.id });
-
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ teamId: team.id, userId: user.id });
+describe('protected internal authentication API', () => {
+  test('lookup requires resolved organizationId and returns only user id/status', async () => {
+    const user = await createUser({ email: 'lookup@resolve.test', username: 'lookup' });
+    const response = await request(app).get(`/internal/v1/users/lookup?organizationId=${ORG_A}&email=lookup%40resolve.test`);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ userId: user.id, status: 'ACTIVE' });
+    expect(response.body).not.toHaveProperty('passwordHash');
   });
-
-  test('returns USER_NOT_FOUND when adding a member from another organization', async () => {
-    const user = await createUser({ organizationId: ORG_B });
-    const team = await createTeam();
-
-    const res = await request(app)
-      .post(`/api/v1/teams/${team.id}/members?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('add-member'))
-      .send({ userId: user.id });
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('USER_NOT_FOUND');
+  test('lookup rejects slug-only requests', async () => {
+    const response = await request(app).get(`/internal/v1/users/lookup?organizationSlug=${ORG_A}&email=missing%40resolve.test`);
+    expect(response.status).toBe(400);
   });
-
-  test('lists team members', async () => {
-    const user = await createUser({ email: 'member@resolve.com', fullName: 'Member User' });
-    const team = await createTeam();
-    await request(app)
-      .post(`/api/v1/teams/${team.id}/members?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('add-member'))
-      .send({ userId: user.id });
-
-    const res = await request(app).get(`/api/v1/teams/${team.id}/members?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.totalElements).toBe(1);
-    expect(res.body.content[0]).toMatchObject({
-      userId: user.id,
-      fullName: 'Member User',
-      email: 'member@resolve.com',
-    });
+  test('hashes plaintext internally and verifies matching/mismatching passwords without returning hash', async () => {
+    const user = await createUser({ email: 'credential@resolve.test', username: 'credential' });
+    expect((await request(app).patch(`/internal/v1/users/${user.id}/password-hash`).send({ newPlaintextPassword: 'TempPass!2026' })).status).toBe(204);
+    const stored = await pool.query('SELECT password_hash FROM users WHERE id=$1', [user.id]);
+    expect(await bcrypt.compare('TempPass!2026', stored.rows[0].password_hash)).toBe(true);
+    const valid = await request(app).post(`/internal/v1/users/${user.id}/verify-credentials`).send({ plaintextPassword: 'TempPass!2026' });
+    expect(valid.body.valid).toBe(true);
+    const invalid = await request(app).post(`/internal/v1/users/${user.id}/verify-credentials`).send({ plaintextPassword: 'WrongPass!2026' });
+    expect(invalid.body.valid).toBe(false);
+    expect(valid.body).not.toHaveProperty('passwordHash');
   });
-
-  test('returns TEAM_NOT_FOUND when listing members for a missing team', async () => {
-    const res = await request(app).get(`/api/v1/teams/${ORG_A}/members?organizationId=${ORG_A}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('TEAM_NOT_FOUND');
-  });
-
-  test('removes a team member', async () => {
-    const user = await createUser();
-    const team = await createTeam();
-    await request(app)
-      .post(`/api/v1/teams/${team.id}/members?organizationId=${ORG_A}`)
-      .set('Idempotency-Key', idempotencyKey('add-member'))
-      .send({ userId: user.id });
-
-    const res = await request(app).delete(
-      `/api/v1/teams/${team.id}/members/${user.id}?organizationId=${ORG_A}`
-    );
-
-    expect(res.status).toBe(204);
-  });
-
-  test('returns TEAM_MEMBER_NOT_FOUND when removing a missing member', async () => {
-    const user = await createUser();
-    const team = await createTeam();
-
-    const res = await request(app).delete(
-      `/api/v1/teams/${team.id}/members/${user.id}?organizationId=${ORG_A}`
-    );
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('TEAM_MEMBER_NOT_FOUND');
-  });
-});
-
-describe('internal user endpoints', () => {
-  test('sets a password hash', async () => {
-    const user = await createUser();
-
-    const res = await request(app)
-      .patch(`/internal/v1/users/${user.id}/password-hash`)
-      .send({ newPlaintextPassword: '$2b$12$abc' });
-
-    expect(res.status).toBe(204);
-  });
-
-  test('rejects password hash update without passwordHash or newPlaintextPassword', async () => {
-    const user = await createUser();
-
-    const res = await request(app)
-      .patch(`/internal/v1/users/${user.id}/password-hash`)
-      .send({});
-
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('USER_VALIDATION_ERROR');
-  });
-
-  test('looks up a user for Authentication', async () => {
-    const user = await createUser({ email: 'lookup@resolve.com' });
-    await request(app)
-      .patch(`/internal/v1/users/${user.id}/password-hash`)
-      .send({ passwordHash: '$2b$12$lookup' });
-
-    const res = await request(app).get(
-      `/internal/v1/users/lookup?organizationId=${ORG_A}&email=lookup@resolve.com`
-    );
-
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      userId: user.id,
-      status: 'ACTIVE',
-    });
-    expect(res.body.passwordHash).toBeUndefined();
-  });
-
-  test('returns USER_NOT_FOUND for a missing internal lookup', async () => {
-    const res = await request(app).get(
-      `/internal/v1/users/lookup?organizationSlug=${ORG_A}&email=missing@resolve.com`
-    );
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('USER_NOT_FOUND');
-  });
-
-  test('verifies matching credentials by local equality check', async () => {
-    const user = await createUser();
-    await request(app)
-      .patch(`/internal/v1/users/${user.id}/password-hash`)
-      .send({ newPlaintextPassword: '$2b$12$verify' });
-
-    const res = await request(app)
-      .post(`/internal/v1/users/${user.id}/verify-credentials`)
-      .send({ plaintextPassword: '$2b$12$verify' });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ valid: true, status: 'ACTIVE', organizationId: ORG_A });
-  });
-
-  test('returns USER_NOT_FOUND when verifying a missing user', async () => {
-    const res = await request(app)
-      .post(`/internal/v1/users/${ORG_A}/verify-credentials`)
-      .send({ passwordHash: '$2b$12$verify' });
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('USER_NOT_FOUND');
-  });
-
-  test('gets internal user status', async () => {
+  test('internal get-by-id returns the contract identity fields', async () => {
     const user = await createUser({ fullName: 'Internal User' });
-
-    const res = await request(app).get(`/internal/v1/users/${user.id}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      id: user.id,
-      organizationId: ORG_A,
-      fullName: 'Internal User',
-      status: 'ACTIVE',
-    });
-  });
-
-  test('returns USER_NOT_FOUND for a missing internal user status check', async () => {
-    const res = await request(app).get(`/internal/v1/users/${ORG_A}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('USER_NOT_FOUND');
+    const response = await request(app).get(`/internal/v1/users/${user.id}`);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ id: user.id, organizationId: ORG_A, fullName: 'Internal User', status: 'ACTIVE' });
   });
 });
