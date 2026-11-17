@@ -10,7 +10,7 @@ function requireTeamPermission(req, permission, message) {
 }
 const TEAM_SORT_COLUMNS = new Set(['created_at', 'updated_at', 'name']);
 async function createTeam(req, res) {
-  await assertOrganizationActive(req.organizationId);
+ // await assertOrganizationActive(req.organizationId);
   try { return res.status(201).json(await teamsRepository.insertTeam({ organizationId: req.organizationId, name: req.validatedBody.name })); }
   catch (err) { if (teamsRepository.isUniqueViolation(err)) throw teamNameTakenError(); throw err; }
 }

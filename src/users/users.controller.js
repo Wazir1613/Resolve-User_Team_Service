@@ -15,7 +15,7 @@ function notFound() { return new HttpError(404, 'USER_NOT_FOUND', 'User not foun
 function canManage(req) { return hasPermission(req, 'IAM_USER_MANAGE'); }
 
 async function createUser(req, res) {
-  await assertOrganizationActive(req.organizationId);
+  //await assertOrganizationActive(req.organizationId);
   try {
     const user = await usersRepository.insertUser({
       organizationId: req.organizationId,
